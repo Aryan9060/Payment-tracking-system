@@ -1,0 +1,20 @@
+{
+  "name": "invoice-tracker-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "REST API for the Invoice & Payment Tracking System",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "dev": "node --watch server.js",
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.6.1",
+    "express": "^5.1.0",
+    "helmet": "^8.1.0",
+    "mongoose": "^8.19.0",
+    "morgan": "^1.10.1"
+  }
+}
