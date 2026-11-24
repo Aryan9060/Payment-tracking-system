@@ -1,6 +1,7 @@
 import api from './client.js';
 
-export const fetchInvoices = async () => (await api.get('/invoices')).data;
+export const fetchInvoices = async (params = {}) =>
+  (await api.get('/invoices', { params })).data;
 
 export const fetchInvoice = async (id) => (await api.get(`/invoices/${id}`)).data;
 

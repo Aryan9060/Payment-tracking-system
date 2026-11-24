@@ -152,7 +152,7 @@ export default function InvoiceDetail() {
         <div>
           <div className="title-row">
             <h1>{invoice.invoiceNumber}</h1>
-            <StatusBadge status={invoice.status} />
+            <StatusBadge status={invoice.status} overdue={invoice.isOverdue} />
           </div>
           <p className="subtitle">
             {invoice.customerName} · Issued {formatDate(invoice.issueDate)}

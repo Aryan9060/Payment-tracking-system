@@ -1,11 +1,12 @@
 # InvoiceTrack — Invoice & Payment Tracking System
 
 A small MERN application for a single business owner to create invoices, record full or partial
-payments, and see what has been collected versus what is still outstanding.
+payments, search and filter invoices, and see what has been collected versus what is still
+outstanding. The UI uses a warm orange theme.
 
-The scope is intentionally narrow: invoices, payments, automatic status calculation, dashboard
-totals, and one payments chart. There is no authentication, customer module, tax engine, or PDF
-generation.
+The scope is intentionally narrow: invoices, payments, automatic status calculation, overdue
+detection, search/filters, CSV export, dashboard totals, and three dashboard charts. There is no
+authentication, customer module, tax engine, or PDF generation.
 
 ## Contents
 
@@ -31,17 +32,23 @@ generation.
   deletion.
 - Record multiple payments against one invoice, including partial payments.
 - "Mark as paid" action that records a payment for the exact remaining balance.
-- Paid amount, remaining amount, and status are never entered manually; they are derived from the
-  payments collection.
+- Paid amount, remaining amount, status, and overdue flag are never entered manually; they are
+  derived from the invoice and payments collection.
 - Overpayment is rejected by the API.
 - An invoice amount cannot be edited below the amount already paid.
 - Deleting an invoice also deletes its payments.
-- Dashboard totals: number of invoices, total invoiced, total received, total outstanding, and
-  counts of paid / partially paid / unpaid invoices.
-- One chart: payments received per month over the last six calendar months (Recharts).
+- Search across invoice number, customer name, and description.
+- Advanced filters: payment status (including overdue), issue-date range, amount range, and sorting
+  by date, amount, or due date.
+- Overdue badges on invoices whose due date has passed and that are not fully paid.
+- CSV export of the currently filtered invoice list.
+- Dashboard totals: number of invoices, total invoiced, total received, total outstanding, counts of
+  paid / partially paid / unpaid invoices, overdue count and amount, and collection rate.
+- Three dashboard charts: invoiced versus collected per month (last six months), invoice-status
+  distribution, and payments by method (Recharts).
 - Invoice detail page with payment history, progress bar, and payment form.
 - Responsive layout: sidebar on desktop, top navigation on mobile; secondary table columns collapse
-  on small screens.
+  on small screens and the filter panel stacks.
 - Basic loading, empty, error, and success states; confirmation dialogs before delete and mark-paid.
 
 ## Tech stack
@@ -54,10 +61,11 @@ generation.
 | Vite | 8.3 | Dev server and build |
 | React Router DOM | 7.18 | Client-side routing |
 | Axios | 1.21 | HTTP client |
-| Recharts | 3.11 | Monthly payments bar chart |
+| Recharts | 3.11 | Dashboard bar and donut charts |
 | Lucide React | 1.78 | Icons |
 
-Plain CSS is used (no UI framework). Currency is formatted as INR (`en-IN`).
+Plain CSS is used (no UI framework) with an orange accent palette. Currency is formatted as INR
+(`en-IN`).
 
 ### Server
 
@@ -88,8 +96,11 @@ Vite dev proxy  ──────────────►  Express API (:500
 
 - The client calls `/api/...`; Vite proxies those requests to `http://localhost:5000` during
   development. CORS on the server allows only `CLIENT_ORIGIN`.
-- The API calculates payment summaries on read. `paidAmount`, `remainingAmount`, and `status` are
-  not stored on the invoice document, which keeps them consistent with the payments collection.
+- The API calculates payment summaries on read. `paidAmount`, `remainingAmount`, `status`, and
+  `isOverdue` are not stored on the invoice document, which keeps them consistent with the payments
+  collection.
+- Search, issue-date, and amount filters run in the MongoDB query; status and overdue filters and the
+  "due soonest" sort are applied after payment totals are calculated.
 - The server is split into models, controllers, routes, utilities, and one error-handling
   middleware. Express 5 forwards rejected async handlers to that middleware automatically.
 
@@ -109,8 +120,8 @@ Payment tracking system/
 │   │   │   ├── States.jsx             # loading, empty, error, success UI
 │   │   │   └── StatusBadge.jsx
 │   │   ├── pages/
-│   │   │   ├── Dashboard.jsx          # totals, chart, recent invoices
-│   │   │   ├── Invoices.jsx           # invoice table + delete
+│   │   │   ├── Dashboard.jsx          # totals, three charts, recent invoices
+│   │   │   ├── Invoices.jsx           # search, filters, sort, CSV export, table
 │   │   │   ├── InvoiceDetail.jsx      # history, payments, mark paid, delete
 │   │   │   └── InvoiceForm.jsx        # create and edit
 │   │   ├── utils/format.js            # currency and date formatting
@@ -164,8 +175,8 @@ Database name in the example configuration: `invoice_tracker`.
 | `notes` | String | Optional, max 500 characters |
 | `createdAt` / `updatedAt` | Date | Mongoose timestamps |
 
-`paidAmount`, `remainingAmount`, and `status` are **derived fields added to API responses**; they
-are not persisted on this document.
+`paidAmount`, `remainingAmount`, `status`, and `isOverdue` are **derived fields added to API
+responses**; they are not persisted on this document.
 
 ### `payments`
 
@@ -175,7 +186,7 @@ are not persisted on this document.
 | `invoice` | ObjectId | Required, references `invoices._id`, indexed |
 | `amount` | Number | Required, greater than 0, cannot exceed the invoice's remaining balance |
 | `method` | String | `Cash`, `UPI`, `Bank Transfer`, `Card`, or `Other` (default `Other`) |
-| `date` | Date | Defaults to now; used by the monthly chart |
+| `date` | Date | Defaults to now; used by the dashboard monthly series |
 | `note` | String | Optional, max 200 characters |
 | `createdAt` / `updatedAt` | Date | Mongoose timestamps |
 
@@ -204,9 +215,16 @@ status =
   "Paid"            if remainingAmount <= 0
   "Partially Paid"  if paidAmount > 0 and remainingAmount > 0
   "Unpaid"          if paidAmount == 0
+
+isOverdue = dueDate exists
+            and dueDate (UTC day) < today (UTC day)
+            and status != "Paid"
 ```
 
-- The client never posts `paidAmount`, `remainingAmount`, or `status`; the server ignores them.
+- `isOverdue` is also derived on read and is not stored. Invoices without a due date are never
+  overdue; a due date of today is not overdue.
+- The client never posts `paidAmount`, `remainingAmount`, `status`, or `isOverdue`; the server
+  ignores them.
 - A new payment is rejected with HTTP 400 if it is greater than the current remaining balance or if
   the invoice is already fully paid.
 - On edit, the invoice amount must be greater than or equal to the amount already paid.
@@ -230,13 +248,40 @@ Base URL: `http://localhost:5000/api`. The React app uses `/api`, which Vite pro
 
 | Method | Endpoint | Description | Success |
 | --- | --- | --- | --- |
-| GET | `/invoices` | All invoices, newest first, each with `paidAmount`, `remainingAmount`, `status` | 200 |
+| GET | `/invoices` | List invoices (newest first by default); supports search, filters, and sorting (see below) | 200 |
 | POST | `/invoices` | Create an invoice; `invoiceNumber` is generated | 201 |
 | GET | `/invoices/:id` | One invoice plus its `payments[]`, newest payment first | 200 |
 | PUT | `/invoices/:id` | Update customer, description, amount, dates, and notes | 200 |
 | DELETE | `/invoices/:id` | Delete the invoice and all of its payments | 200 |
 | POST | `/invoices/:id/payments` | Record a full or partial payment | 201 |
 | POST | `/invoices/:id/mark-paid` | Record a payment for the exact remaining balance | 201 |
+
+Every invoice object in list and detail responses includes `paidAmount`, `remainingAmount`,
+`status`, and `isOverdue`.
+
+#### List query parameters
+
+All parameters are optional and combine with AND. Invalid values return HTTP 400.
+
+| Parameter | Accepted values | Behaviour |
+| --- | --- | --- |
+| `search` | text | Case-insensitive match on `invoiceNumber`, `customerName`, or `description`. Regex characters are escaped. |
+| `status` | `paid`, `partial`, `unpaid`, `overdue` | `partial` means "Partially Paid"; `overdue` matches `isOverdue`. |
+| `from` | `YYYY-MM-DD` | Inclusive lower bound on `issueDate`. |
+| `to` | `YYYY-MM-DD` | Inclusive upper bound on `issueDate` (end of day UTC). |
+| `minAmount` | number >= 0 | Inclusive lower bound on invoice `amount`. |
+| `maxAmount` | number >= 0 | Inclusive upper bound on invoice `amount`. |
+| `sort` | `newest` (default), `oldest`, `amount-desc`, `amount-asc`, `due-asc` | `due-asc` sorts soonest first and puts invoices without a due date last. |
+
+Example:
+
+```bash
+curl "http://localhost:5000/api/invoices?search=design&status=overdue&from=2026-06-01&sort=amount-desc"
+```
+
+Search, date, and amount filters run in MongoDB; status/overdue filtering and the `due-asc` sort are
+applied after payment totals are calculated. The list is not paginated. CSV export is generated in the
+browser from the currently filtered list; it is not a separate API endpoint.
 
 Create/update body:
 
@@ -277,7 +322,7 @@ Mark paid body (optional):
 
 | Method | Endpoint | Description | Success |
 | --- | --- | --- | --- |
-| GET | `/dashboard` | Totals, six-month payment series, five most recent invoices | 200 |
+| GET | `/dashboard` | Totals, six-month invoiced/collected series, status and payment-method breakdowns, five most recent invoices | 200 |
 
 Abbreviated response shape:
 
@@ -290,16 +335,25 @@ Abbreviated response shape:
     "totalOutstanding": 1000,
     "paidCount": 0,
     "partialCount": 1,
-    "unpaidCount": 0
+    "unpaidCount": 0,
+    "overdueCount": 1,
+    "overdueAmount": 1000,
+    "collectionRate": 33.33
   },
-  "monthlyPayments": [
-    { "label": "Jun 2026", "amount": 0 },
-    { "label": "Jul 2026", "amount": 0 },
-    { "label": "Aug 2026", "amount": 0 },
-    { "label": "Sep 2026", "amount": 0 },
-    { "label": "Oct 2026", "amount": 0 },
-    { "label": "Nov 2026", "amount": 500 }
+  "monthlySeries": [
+    { "label": "Jun 2026", "invoiced": 0, "collected": 0 },
+    { "label": "Jul 2026", "invoiced": 0, "collected": 0 },
+    { "label": "Aug 2026", "invoiced": 0, "collected": 0 },
+    { "label": "Sep 2026", "invoiced": 0, "collected": 0 },
+    { "label": "Oct 2026", "invoiced": 0, "collected": 0 },
+    { "label": "Nov 2026", "invoiced": 1500, "collected": 500 }
   ],
+  "statusDistribution": [
+    { "name": "Paid", "value": 0 },
+    { "name": "Partially Paid", "value": 1 },
+    { "name": "Unpaid", "value": 0 }
+  ],
+  "paymentMethods": [{ "name": "UPI", "value": 500, "count": 1 }],
   "recentInvoices": [
     {
       "_id": "671be6a1f0c2a4b5d6e7f809",
@@ -309,7 +363,8 @@ Abbreviated response shape:
       "amount": 1500,
       "paidAmount": 500,
       "remainingAmount": 1000,
-      "status": "Partially Paid"
+      "status": "Partially Paid",
+      "isOverdue": true
     }
   ]
 }
@@ -317,7 +372,14 @@ Abbreviated response shape:
 
 - `totalPaid` is the sum of all payment documents.
 - `totalOutstanding` sums the clamped remaining balance of each invoice.
-- `monthlyPayments` always contains six entries, oldest to newest, grouped by `payment.date`.
+- `overdueCount` counts unpaid or partially paid invoices whose due date has passed;
+  `overdueAmount` sums their remaining balances.
+- `collectionRate` is `totalPaid / totalInvoiced` as a percentage rounded to two decimals (0 when
+  there are no invoices, capped at 100).
+- `monthlySeries` always contains six entries, oldest to newest. `invoiced` is grouped by
+  `invoice.issueDate`; `collected` is grouped by `payment.date`.
+- `statusDistribution` counts invoices in each status; `paymentMethods` is all-time, with amount and
+  payment count per method, sorted by amount descending.
 - `recentInvoices` contains up to five invoices with the same summary fields as `GET /invoices`.
 - The example is abbreviated; real invoice objects also include dates, notes, and timestamps.
 
@@ -334,6 +396,8 @@ curl -X POST http://localhost:5000/api/invoices/<invoiceId>/payments \
   -H "Content-Type: application/json" \
   -d '{"amount":500,"method":"UPI","date":"2026-11-24","note":"Advance payment"}'
 
+curl "http://localhost:5000/api/invoices?status=overdue&sort=amount-desc"
+
 curl http://localhost:5000/api/dashboard
 ```
 
@@ -343,7 +407,7 @@ Errors use `{ "message": "..." }` (validation errors may also include an `errors
 
 | Status | Used for |
 | --- | --- |
-| 400 | Invalid input, malformed id, overpayment, payment on a paid invoice, amount below paid |
+| 400 | Invalid input, malformed id, overpayment, payment on a paid invoice, amount below paid, invalid list filter values |
 | 404 | Invoice not found, unknown route |
 | 409 | Unique invoice-number collision (retry fallback) |
 | 500 | Unhandled server error |
@@ -414,7 +478,9 @@ Open `http://localhost:5173`.
 1. Open **Invoices** and click **New invoice**.
 2. Fill in the customer, description, amount, and dates.
 3. Open the invoice and record a partial payment, or use **Mark as paid**.
-4. Return to **Dashboard** to see totals, status counts, and the monthly payments chart.
+4. Use the search box and filter panel on **Invoices** to find overdue or partially paid invoices,
+   sort the list, and export the filtered rows as CSV.
+5. Return to **Dashboard** to see totals, overdue amounts, the collection rate, and the three charts.
 
 The database starts empty; there is no seed script.
 
@@ -447,15 +513,16 @@ does not include a production server that hosts that build; see limitations.
 
 Captured from the running application with sample data.
 
-**Dashboard** — totals, monthly payments chart, recent invoices.
+**Dashboard** — orange theme, totals with overdue amount, invoiced-versus-collected chart,
+collection progress, status and payment-method donuts, recent invoices.
 
 ![Dashboard](docs/screenshots/dashboard.png)
 
-**Invoices** — all invoices with derived paid/remaining amounts and status.
+**Invoices** — search and advanced filters, sort control, CSV export, and overdue badges.
 
 ![Invoices](docs/screenshots/invoices.png)
 
-**Invoice detail** — payment summary, payment history, and the fully paid state.
+**Invoice detail** — payment summary, payment history, overdue badge, and the payment form.
 
 ![Invoice detail](docs/screenshots/invoice-detail.png)
 
@@ -471,7 +538,17 @@ API scenarios checked:
 - Overpayment rejected (HTTP 400); payment on a fully paid invoice rejected.
 - Exact remaining payment → `Paid`.
 - Mark-paid endpoint records the full remaining balance.
-- Dashboard totals, six-month series, and recent invoices match the stored data.
+- Dashboard totals, six-month series, status distribution, payment methods, and recent invoices match
+  the stored data.
+- Overdue flag is set for unpaid/partially paid invoices past their due date, and is false for paid
+  invoices and invoices without a due date.
+- Search matches invoice number, customer name, and description (case-insensitive); regex characters
+  are treated literally.
+- Status filters (`paid`, `partial`, `unpaid`, `overdue`) return the correct invoices; invalid status
+  and sort values return 400.
+- Issue-date and amount ranges filter inclusively; reversed date ranges and min-greater-than-max
+  return 400.
+- Sorting by amount (ascending/descending) and due date (soonest) returns the expected order.
 - Edit rejected when the new amount is below the amount paid; valid edit succeeds.
 - Delete removes the invoice and its payments; dashboard totals update.
 - Deleted invoice numbers are not reused.
@@ -481,8 +558,14 @@ Browser scenarios checked:
 
 - Create, edit, delete (with confirmation), record partial payment, overpayment error display,
   mark paid, and dashboard refresh using the real UI and API.
-- Chart renders from live data; no console errors or failed requests.
-- No horizontal page overflow on desktop or mobile; compact mobile table shows all actions.
+- Search, clear, status filter, amount filter, sort, and combined search + status filtering return
+  the expected rows.
+- CSV export downloads a file with the expected header and one row per filtered invoice.
+- All three charts render from live data with the expected legends; overdue badges appear only on
+  unpaid/partially paid past-due invoices.
+- Orange theme is applied to the sidebar, buttons, links, progress bars, and charts.
+- No console errors or failed requests; no horizontal page overflow on desktop or mobile, and the
+  mobile invoice table fits inside its wrapper.
 
 The repository does **not** include an automated test suite. The checks above were scripted during
 development against the running API and browser; no test files are committed.
@@ -514,21 +597,26 @@ Data and calculations:
   UTC to avoid off-by-one shifts.
 - Invoice numbering depends on the `counters` collection. Manually editing or deleting that collection
   can affect the sequence; the unique index still prevents duplicate invoice numbers.
-- The monthly chart covers only the last six calendar months and only payments whose `date` falls in
-  that window. Months without payments show zero.
-- Lists load all invoices and the dashboard loads all invoices/payments; there is no pagination,
-  search, sorting UI, or filtering.
+- The monthly series covers only the last six calendar months. `invoiced` uses `issueDate` and
+  `collected` uses `payment.date`; months without activity show zero. The payment-method breakdown is
+  all-time.
+- Lists load all invoices and the dashboard loads all invoices/payments; there is no pagination.
+  Search, date, and amount filters run in MongoDB, but status/overdue filtering happens after payment
+  totals are computed, and none of the text-search fields are indexed.
+- CSV export happens in the browser and contains only the rows currently visible after filtering. It
+  has no server-side export or scheduled backup.
 
 Operations and UI:
 
 - Helmet, CORS, and a 100 kB JSON body limit are enabled, and input is validated server-side, but the
   app has no rate limiting, CSRF protection, audit log, or security review. It is not
   production-hardened.
-- The client build is a single JavaScript bundle of roughly 760 kB (228 kB gzipped), largely due to
+- The client build is a single JavaScript bundle of roughly 807 kB (240 kB gzipped), largely due to
   Recharts. No route-level code splitting is configured.
 - Production hosting is not wired up. The Vite dev proxy handles `/api`; a deployment would need a
   reverse proxy (or a different API base URL) plus static hosting for `client/dist`.
-- No offline support, automated backups, or data export.
+- No offline support or automated backups. CSV export covers the filtered invoice list only; there
+  is no import or full-database export.
 - UI supports current evergreen browsers; no legacy browser testing was done.
 
 ## Future enhancements
@@ -539,7 +627,7 @@ Not implemented, listed only as possible next steps:
 - A real customer entity with invoice history.
 - Line items, tax, discounts, and PDF invoices.
 - Ability to edit/delete individual payments with an audit trail.
-- Search, filters, sorting, and pagination.
+- Pagination plus indexed full-text search for larger datasets.
 - Integer-minor-unit or `Decimal128` money storage.
 - Automated API and end-to-end tests.
 - Production deployment configuration with HTTPS.

@@ -1,6 +1,16 @@
 import Invoice from '../models/Invoice.js';
 import Payment from '../models/Payment.js';
-import { getPaymentStatus, round2, withPaymentSummary } from '../utils/calculations.js';
+import {
+  getPaymentStatus,
+  isInvoiceOverdue,
+  round2,
+  withPaymentSummary,
+} from '../utils/calculations.js';
+
+function monthKey(date) {
+  const value = new Date(date);
+  return `${value.getUTCFullYear()}-${String(value.getUTCMonth() + 1).padStart(2, '0')}`;
+}
 
 export async function getDashboard(req, res) {
   const [invoices, payments] = await Promise.all([
@@ -22,38 +32,62 @@ export async function getDashboard(req, res) {
     paidCount: 0,
     partialCount: 0,
     unpaidCount: 0,
+    overdueCount: 0,
+    overdueAmount: 0,
+    collectionRate: 0,
   };
-
-  for (const invoice of invoices) {
-    const paid = paidMap.get(String(invoice._id)) || 0;
-    const status = getPaymentStatus(invoice.amount, paid);
-
-    totals.totalInvoiced = round2(totals.totalInvoiced + invoice.amount);
-    totals.totalOutstanding = round2(totals.totalOutstanding + Math.max(round2(invoice.amount - paid), 0));
-
-    if (status === 'Paid') totals.paidCount += 1;
-    else if (status === 'Partially Paid') totals.partialCount += 1;
-    else totals.unpaidCount += 1;
-  }
 
   const months = [];
   const now = new Date();
   for (let offset = 5; offset >= 0; offset -= 1) {
-    const date = new Date(now.getFullYear(), now.getMonth() - offset, 1);
+    const date = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - offset, 1));
     months.push({
-      key: `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`,
-      label: date.toLocaleString('en-US', { month: 'short', year: 'numeric' }),
-      amount: 0,
+      key: `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`,
+      label: date.toLocaleString('en-US', { month: 'short', year: 'numeric', timeZone: 'UTC' }),
+      invoiced: 0,
+      collected: 0,
     });
   }
-
   const monthIndex = new Map(months.map((month, index) => [month.key, index]));
-  for (const payment of payments) {
-    const date = new Date(payment.date);
-    const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
-    const index = monthIndex.get(key);
+
+  for (const invoice of invoices) {
+    const paid = paidMap.get(String(invoice._id)) || 0;
+    const status = getPaymentStatus(invoice.amount, paid);
+    const remaining = Math.max(round2(invoice.amount - paid), 0);
+
+    totals.totalInvoiced = round2(totals.totalInvoiced + invoice.amount);
+    totals.totalOutstanding = round2(totals.totalOutstanding + remaining);
+
+    if (status === 'Paid') totals.paidCount += 1;
+    else if (status === 'Partially Paid') totals.partialCount += 1;
+    else totals.unpaidCount += 1;
+
+    if (isInvoiceOverdue(invoice.dueDate, status)) {
+      totals.overdueCount += 1;
+      totals.overdueAmount = round2(totals.overdueAmount + remaining);
+    }
+
+    const index = monthIndex.get(monthKey(invoice.issueDate));
     if (index !== undefined) {
-      months[index].amount = round2(months[index].amount + payment.amount);
+      months[index].invoiced = round2(months[index].invoiced + invoice.amount);
+    }
+  }
+
+  totals.collectionRate =
+    totals.totalInvoiced > 0
+      ? Math.min(round2((totals.totalPaid / totals.totalInvoiced) * 100), 100)
+      : 0;
+
+  const methodMap = new Map();
+  for (const payment of payments) {
+    const entry = methodMap.get(payment.method) || { name: payment.method, value: 0, count: 0 };
+    entry.value = round2(entry.value + payment.amount);
+    entry.count += 1;
+    methodMap.set(payment.method, entry);
+
+    const index = monthIndex.get(monthKey(payment.date));
+    if (index !== undefined) {
+      months[index].collected = round2(months[index].collected + payment.amount);
     }
   }
 
@@ -64,7 +98,13 @@ export async function getDashboard(req, res) {
 
   res.json({
     totals,
-    monthlyPayments: months.map(({ label, amount }) => ({ label, amount })),
+    monthlySeries: months.map(({ label, invoiced, collected }) => ({ label, invoiced, collected })),
+    statusDistribution: [
+      { name: 'Paid', value: totals.paidCount },
+      { name: 'Partially Paid', value: totals.partialCount },
+      { name: 'Unpaid', value: totals.unpaidCount },
+    ],
+    paymentMethods: [...methodMap.values()].sort((a, b) => b.value - a.value),
     recentInvoices,
   });
 }

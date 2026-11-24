@@ -65,8 +65,92 @@ async function getPaidTotal(invoiceId) {
   return round2(result?.total || 0);
 }
 
+const SORT_OPTIONS = {
+  newest: { createdAt: -1 },
+  oldest: { createdAt: 1 },
+  'amount-desc': { amount: -1 },
+  'amount-asc': { amount: 1 },
+};
+
+const STATUS_FILTERS = {
+  paid: 'Paid',
+  partial: 'Partially Paid',
+  unpaid: 'Unpaid',
+};
+
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function parseAmountQuery(value) {
+  if (value === undefined || value === '') return null;
+  const amount = Number(value);
+  return Number.isFinite(amount) && amount >= 0 ? amount : undefined;
+}
+
 export async function getInvoices(req, res) {
-  const invoices = await Invoice.find().sort({ createdAt: -1 }).lean();
+  const query = req.query || {};
+  const filter = {};
+
+  const search = typeof query.search === 'string' ? query.search.trim() : '';
+  if (search) {
+    const pattern = new RegExp(escapeRegex(search), 'i');
+    filter.$or = [
+      { invoiceNumber: pattern },
+      { customerName: pattern },
+      { description: pattern },
+    ];
+  }
+
+  const issueFrom = parseDate(query.from);
+  const issueTo = parseDate(query.to);
+  if (issueFrom === undefined || issueTo === undefined) {
+    return res.status(400).json({ message: 'Issue date range is invalid' });
+  }
+  if (issueFrom && issueTo && issueFrom > issueTo) {
+    return res.status(400).json({ message: 'Issued from cannot be after issued to' });
+  }
+  if (issueFrom || issueTo) {
+    filter.issueDate = {};
+    if (issueFrom) filter.issueDate.$gte = issueFrom;
+    if (issueTo) {
+      const end = new Date(issueTo);
+      end.setUTCHours(23, 59, 59, 999);
+      filter.issueDate.$lte = end;
+    }
+  }
+
+  const minAmount = parseAmountQuery(query.minAmount);
+  const maxAmount = parseAmountQuery(query.maxAmount);
+  if (minAmount === undefined || maxAmount === undefined) {
+    return res.status(400).json({ message: 'Amount filters must be non-negative numbers' });
+  }
+  if (minAmount !== null && maxAmount !== null && minAmount > maxAmount) {
+    return res.status(400).json({ message: 'Minimum amount cannot be greater than maximum' });
+  }
+  if (minAmount !== null || maxAmount !== null) {
+    filter.amount = {};
+    if (minAmount !== null) filter.amount.$gte = minAmount;
+    if (maxAmount !== null) filter.amount.$lte = maxAmount;
+  }
+
+  const sortKey = typeof query.sort === 'string' && query.sort ? query.sort : 'newest';
+  if (sortKey !== 'due-asc' && !SORT_OPTIONS[sortKey]) {
+    return res
+      .status(400)
+      .json({ message: `Sort must be one of: ${Object.keys(SORT_OPTIONS).join(', ')}, due-asc` });
+  }
+
+  const statusKey = typeof query.status === 'string' ? query.status.toLowerCase() : '';
+  if (statusKey && statusKey !== 'overdue' && !STATUS_FILTERS[statusKey]) {
+    return res
+      .status(400)
+      .json({ message: 'Status must be one of: paid, partial, unpaid, overdue' });
+  }
+
+  const invoices = await Invoice.find(filter)
+    .sort(SORT_OPTIONS[sortKey] || { createdAt: -1 })
+    .lean();
 
   const sums = await Payment.aggregate([
     { $match: { invoice: { $in: invoices.map((invoice) => invoice._id) } } },
@@ -74,9 +158,27 @@ export async function getInvoices(req, res) {
   ]);
   const paidMap = new Map(sums.map((entry) => [String(entry._id), entry.paid]));
 
-  res.json(
-    invoices.map((invoice) => withPaymentSummary(invoice, paidMap.get(String(invoice._id)) || 0))
+  let summaries = invoices.map((invoice) =>
+    withPaymentSummary(invoice, paidMap.get(String(invoice._id)) || 0)
   );
+
+  if (statusKey) {
+    summaries =
+      statusKey === 'overdue'
+        ? summaries.filter((invoice) => invoice.isOverdue)
+        : summaries.filter((invoice) => invoice.status === STATUS_FILTERS[statusKey]);
+  }
+
+  if (sortKey === 'due-asc') {
+    summaries.sort((a, b) => {
+      const aDue = a.dueDate ? new Date(a.dueDate).getTime() : Infinity;
+      const bDue = b.dueDate ? new Date(b.dueDate).getTime() : Infinity;
+      if (aDue !== bDue) return aDue - bDue;
+      return new Date(b.createdAt) - new Date(a.createdAt);
+    });
+  }
+
+  res.json(summaries);
 }
 
 export async function getInvoiceById(req, res) {
